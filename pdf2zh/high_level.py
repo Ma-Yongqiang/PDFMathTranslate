@@ -44,33 +44,101 @@ noto_list = [
     "gu",  # Gujarati
     "iw",  # Hebrew
     "hi",  # Hindi
-    # "ja",  # Japanese
     "kn",  # Kannada
-    # "ko",  # Korean
     "ml",  # Malayalam
     "mr",  # Marathi
     "ru",  # Russian
     "sr",  # Serbian
-    # "zh-cn",# SC
     "ta",  # Tamil
     "te",  # Telugu
     "th",  # Thai
-    # "zh-tw",# TC
     "ur",  # Urdu
     "uk",  # Ukrainian
 ]
 
+def get_system_fonts():
+    """获取系统字体路径"""
+    system_fonts = {}
+    
+    if sys.platform == "win32":
+        # Windows 字体路径
+        font_paths = [
+            os.path.join(os.environ["WINDIR"], "Fonts"),
+            os.path.join(os.environ["LOCALAPPDATA"], "Microsoft", "Windows", "Fonts"),
+        ]
+        font_files = {
+            "simsun": ["simsun.ttc", "simsun.ttf"],  # 宋体
+            "simhei": ["simhei.ttf"],  # 黑体
+            "msyh": ["msyh.ttc", "msyh.ttf"],  # 微软雅黑
+            "simkai": ["simkai.ttf"],  # 楷体
+        }
+    elif sys.platform == "darwin":
+        # macOS 字体路径
+        font_paths = [
+            "/System/Library/Fonts",
+            "/Library/Fonts",
+            os.path.expanduser("~/Library/Fonts"),
+        ]
+        font_files = {
+            "simsun": ["Sun.ttf", "STSong.ttf"],  # 宋体
+            "simhei": ["STHeiti.ttf"],  # 黑体
+            "msyh": ["STHeiti Light.ttf"],  # 对应微软雅黑
+            "simkai": ["STKaiti.ttf"],  # 楷体
+        }
+    else:
+        # Linux 字体路径
+        font_paths = [
+            "/usr/share/fonts",
+            "/usr/local/share/fonts",
+            os.path.expanduser("~/.fonts"),
+        ]
+        font_files = {
+            "simsun": ["simsun.ttc", "simsun.ttf"],
+            "simhei": ["simhei.ttf"],
+            "msyh": ["msyh.ttc", "msyh.ttf"],
+            "simkai": ["simkai.ttf"],
+        }
+
+    # 搜索字体文件
+    for font_name, filenames in font_files.items():
+        for font_path in font_paths:
+            if not os.path.exists(font_path):
+                continue
+            for filename in filenames:
+                full_path = os.path.join(font_path, filename)
+                if os.path.exists(full_path):
+                    system_fonts[font_name] = full_path
+                    break
+            if font_name in system_fonts:
+                break
+                
+    return system_fonts
+
+def get_fallback_font():
+    """获取备用字体"""
+    # 创建临时目录存放下载的字体
+    temp_dir = os.path.join(tempfile.gettempdir(), "pdf2zh_fonts")
+    os.makedirs(temp_dir, exist_ok=True)
+    
+    # 下载开源中文字体作为备用
+    fallback_url = "https://github.com/adobe-fonts/source-han-serif/raw/release/OTF/SimplifiedChinese/SourceHanSerifSC-Regular.otf"
+    fallback_path = os.path.join(temp_dir, "SourceHanSerifSC-Regular.otf")
+    
+    if not os.path.exists(fallback_path):
+        try:
+            print("Downloading fallback font...")
+            urllib.request.urlretrieve(fallback_url, fallback_path)
+        except Exception as e:
+            print(f"Failed to download fallback font: {e}")
+            return None
+            
+    return fallback_path if os.path.exists(fallback_path) else None
 
 def check_files(files: List[str]) -> List[str]:
-    files = [
-        f for f in files if not f.startswith("http://")
-    ]  # exclude online files, http
-    files = [
-        f for f in files if not f.startswith("https://")
-    ]  # exclude online files, https
+    files = [f for f in files if not f.startswith("http://")] # exclude online files, http
+    files = [f for f in files if not f.startswith("https://")] # exclude online files, https
     missing_files = [file for file in files if not os.path.exists(file)]
     return missing_files
-
 
 def translate_patch(
     inf: BinaryIO,
@@ -133,7 +201,6 @@ def translate_patch(
                 pix.height, pix.width, 3
             )[:, :, ::-1]
             page_layout = model.predict(image, imgsz=int(pix.height / 32) * 32)[0]
-            # kdtree 是不可能 kdtree 的，不如直接渲染成图片，用空间换时间
             box = np.ones((pix.height, pix.width))
             h, w = box.shape
             vcls = ["abandon", "figure", "table", "isolate_formula", "formula_caption"]
@@ -158,8 +225,7 @@ def translate_patch(
                     )
                     box[y0:y1, x0:x1] = 0
             layout[page.pageno] = box
-            # 新建一个 xref 存放新指令流
-            page.page_xref = doc_zh.get_new_xref()  # hack 插入页面的新 xref
+            page.page_xref = doc_zh.get_new_xref()
             doc_zh.update_object(page.page_xref, "<<>>")
             doc_zh.update_stream(page.page_xref, b"")
             doc_zh[page.pageno].set_contents(page.page_xref)
@@ -167,7 +233,6 @@ def translate_patch(
 
     device.close()
     return obj_patch
-
 
 def translate_stream(
     stream: bytes,
@@ -185,44 +250,53 @@ def translate_stream(
     prompt: List = None,
     **kwarg: Any,
 ):
-    font_list = [("tiro", None)]
+    # 获取系统字体
+    system_fonts = get_system_fonts()
+    
+    # 选择字体顺序：宋体 -> 黑体 -> 微软雅黑 -> 楷体 -> 备用字体
+    font_path = None
+    for font_name in ["simsun", "simhei", "msyh", "simkai"]:
+        if font_name in system_fonts:
+            font_path = system_fonts[font_name]
+            break
+    
+    # 如果没有找到系统字体，使用备用字体
+    if font_path is None:
+        font_path = get_fallback_font()
+        if font_path is None:
+            raise RuntimeError("No suitable font found and failed to get fallback font")
+    
+    # 初始化字体列表
+    font_list = [("CustomFont", font_path)]
     noto = None
+    
     if lang_out.lower() in resfont_map:  # CJK
-        resfont = resfont_map[lang_out.lower()]
-        font_list.append((resfont, None))
+        resfont = "CustomFont"
+        # 已包含在初始字体列表中
     elif lang_out.lower() in noto_list:  # noto
-        resfont = "noto"
-        # docker
-        ttf_path = os.environ.get("NOTO_FONT_PATH", "/app/GoNotoKurrent-Regular.ttf")
-
-        if not os.path.exists(ttf_path):
-            ttf_path = os.path.join(tempfile.gettempdir(), "GoNotoKurrent-Regular.ttf")
-        if not os.path.exists(ttf_path):
-            print("Downloading Noto font...")
-            urllib.request.urlretrieve(
-                "https://github.com/satbyy/go-noto-universal/releases/download/v7.0/GoNotoKurrent-Regular.ttf",
-                ttf_path,
-            )
-        font_list.append(("noto", ttf_path))
-        noto = Font("noto", ttf_path)
+        resfont = "CustomFont"
+        # 已包含在初始字体列表中
     else:  # fallback
-        resfont = "china-ss"
-        font_list.append(("china-ss", None))
+        resfont = "CustomFont"
+        # 已包含在初始字体列表中
 
     doc_en = Document(stream=stream)
     stream = io.BytesIO()
     doc_en.save(stream)
     doc_zh = Document(stream=stream)
     page_count = doc_zh.page_count
-    # font_list = [("china-ss", None), ("tiro", None)]
+
+    # 字体注册
     font_id = {}
     for page in doc_zh:
         for font in font_list:
             font_id[font[0]] = page.insert_font(font[0], font[1])
+
+    # 处理每个 xref 的字体资源
     xreflen = doc_zh.xref_length()
     for xref in range(1, xreflen):
-        for label in ["Resources/", ""]:  # 可能是基于 xobj 的 res
-            try:  # xref 读写可能出错
+        for label in ["Resources/", ""]:  
+            try:
                 font_res = doc_zh.xref_get_key(xref, f"{label}Font")
                 if font_res[0] == "dict":
                     for font in font_list:
@@ -236,23 +310,21 @@ def translate_stream(
             except Exception:
                 pass
 
+    # 处理文档内容
     fp = io.BytesIO()
     doc_zh.save(fp)
     obj_patch: dict = translate_patch(fp, **locals())
 
+    # 更新流内容
     for obj_id, ops_new in obj_patch.items():
-        # ops_old=doc_en.xref_stream(obj_id)
-        # print(obj_id)
-        # print(ops_old)
-        # print(ops_new.encode())
         doc_zh.update_stream(obj_id, ops_new.encode())
 
+    # 构建双语版本
     doc_en.insert_file(doc_zh)
     for id in range(page_count):
         doc_en.move_page(page_count + id, id * 2 + 1)
 
     return doc_zh.write(deflate=1), doc_en.write(deflate=1)
-
 
 def convert_to_pdfa(input_path, output_path):
     """
@@ -302,7 +374,6 @@ def convert_to_pdfa(input_path, output_path):
     pdf.save(output_path, linearize=True)
     pdf.close()
 
-
 def translate(
     files: list[str],
     output: str = "",
@@ -340,9 +411,7 @@ def translate(
             try:
                 r = requests.get(file, allow_redirects=True)
                 if r.status_code == 200:
-                    with tempfile.NamedTemporaryFile(
-                        suffix=".pdf", delete=False
-                    ) as tmp_file:
+                    with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as tmp_file:
                         print(f"Writing the file: {file}...")
                         tmp_file.write(r.content)
                         file = tmp_file.name
@@ -355,11 +424,8 @@ def translate(
         filename = os.path.splitext(os.path.basename(file))[0]
 
         # If the commandline has specified converting to PDF/A format
-        # --compatible / -cp
         if compatible:
-            with tempfile.NamedTemporaryFile(
-                suffix="-pdfa.pdf", delete=False
-            ) as tmp_pdfa:
+            with tempfile.NamedTemporaryFile(suffix="-pdfa.pdf", delete=False) as tmp_pdfa:
                 print(f"Converting {file} to PDF/A format...")
                 convert_to_pdfa(file, tmp_pdfa.name)
                 doc_raw = open(tmp_pdfa.name, "rb")
